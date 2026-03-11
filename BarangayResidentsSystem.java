@@ -1077,6 +1077,24 @@ class SecureFileHandler {
         return history;
     }
     
+    // Method to get all login history from transaction file (for admin view)
+    public static List<String> getAllLoginHistory() {
+        List<String> allLogs = new ArrayList<>();
+        File file = new File(LOGS_FILE);
+        if (!file.exists()) return allLogs;
+        
+        try (BufferedReader br = new BufferedReader(new FileReader(LOGS_FILE))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String decrypted = decryptData(line);
+                allLogs.add(decrypted);
+            }
+        } catch (IOException e) {
+            System.err.println("Error reading logs: " + e.getMessage());
+        }
+        return allLogs;
+    }
+    
     // Private method to serialize Resident object to string
     private static String serializeResident(Resident resident) {
         StringBuilder membersData = new StringBuilder();
@@ -2280,7 +2298,7 @@ public class BarangayResidentsSystem {
                 contentPanel.add(new UserManagementPanel(dashboardUser, dashboardUsers), "user_management");
             }
             
-            contentPanel.add(new AccountSettingsPanel(dashboardUser, dashboardUsers), "account_settings");
+            contentPanel.add(new AccountSettingsPanel(dashboardUser, dashboardUsers, dashboardArchive), "account_settings");
             
             // Select first button by default
             JButton firstButton = sidebarButtons.get("manage_residents");
@@ -2645,7 +2663,7 @@ public class BarangayResidentsSystem {
             this.panelArchive = archive;
             this.dashboard = dashboard;
             this.filteredResidents = new ArrayList<>(residents);
-            this.summaryCardValues = new JLabel[5];
+            this.summaryCardValues = new JLabel[4]; // Changed from 5 to 4 (removed deceased counter)
             
             setLayout(new BorderLayout());
             setBackground(BarangayColors.LIGHT_BACKGROUND);
@@ -2833,14 +2851,14 @@ public class BarangayResidentsSystem {
             centerPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
             
             // Summary cards
-            summaryCardsPanel = new JPanel(new GridLayout(1, 4, 5, 0));
+            summaryCardsPanel = new JPanel(new GridLayout(1, 4, 5, 0)); // Changed from 5 to 4 columns
             summaryCardsPanel.setBackground(Color.WHITE);
             summaryCardsPanel.setBorder(BorderFactory.createEmptyBorder(0, 0, 10, 0));
             
             summaryCardsPanel.add(createSummaryCard("Total Residents", "0", new Color(52, 152, 219), 0));
             summaryCardsPanel.add(createSummaryCard("Total Population", "0", new Color(46, 204, 113), 1));
             summaryCardsPanel.add(createSummaryCard("Senior Citizens", "0", new Color(155, 89, 182), 2));
-            summaryCardsPanel.add(createSummaryCard("Deceased", "0", new Color(149, 165, 166), 3));
+            summaryCardsPanel.add(createSummaryCard("Archived", "0", new Color(149, 165, 166), 3)); // Archived count only, no separate deceased
             
             // Search panel
             JPanel searchPanel = new JPanel(new BorderLayout(5, 0));
@@ -3139,25 +3157,54 @@ public class BarangayResidentsSystem {
         private void loadResidentsData() {
             tableModel.setRowCount(0);
             
-            for (Resident resident : filteredResidents) {
-                String formattedId = String.format("%06d", resident.getResidentID());
-                String status = resident.getStatus().toString();
-                String dateRegistered = DateUtils.formatDisplay(resident.getCreatedAt().toLocalDate());
-                String householdNo = resident.isHouseholdHead() ? "HEAD" : 
-                    String.format("%06d", resident.getHouseholdHeadID());
-                
-                tableModel.addRow(new Object[]{
-                    formattedId,
-                    resident.getFullName(),
-                    resident.getAge(),
-                    resident.getSex(),
-                    resident.getMaritalStatus(),
-                    resident.getAddress(),
-                    resident.getContactNumber(),
-                    householdNo,
-                    status,
-                    dateRegistered
-                });
+            // If user is RESIDENT, only show their own record
+            if (panelUser instanceof ResidentUser) {
+                int residentID = ((ResidentUser) panelUser).getResidentID();
+                for (Resident resident : filteredResidents) {
+                    if (resident.getResidentID() == residentID) {
+                        String formattedId = String.format("%06d", resident.getResidentID());
+                        String status = resident.getStatus().toString();
+                        String dateRegistered = DateUtils.formatDisplay(resident.getCreatedAt().toLocalDate());
+                        String householdNo = resident.isHouseholdHead() ? "HEAD" : 
+                            String.format("%06d", resident.getHouseholdHeadID());
+                        
+                        tableModel.addRow(new Object[]{
+                            formattedId,
+                            resident.getFullName(),
+                            resident.getAge(),
+                            resident.getSex(),
+                            resident.getMaritalStatus(),
+                            resident.getAddress(),
+                            resident.getContactNumber(),
+                            householdNo,
+                            status,
+                            dateRegistered
+                        });
+                        break;
+                    }
+                }
+            } else {
+                // Admin and Staff see all residents
+                for (Resident resident : filteredResidents) {
+                    String formattedId = String.format("%06d", resident.getResidentID());
+                    String status = resident.getStatus().toString();
+                    String dateRegistered = DateUtils.formatDisplay(resident.getCreatedAt().toLocalDate());
+                    String householdNo = resident.isHouseholdHead() ? "HEAD" : 
+                        String.format("%06d", resident.getHouseholdHeadID());
+                    
+                    tableModel.addRow(new Object[]{
+                        formattedId,
+                        resident.getFullName(),
+                        resident.getAge(),
+                        resident.getSex(),
+                        resident.getMaritalStatus(),
+                        resident.getAddress(),
+                        resident.getContactNumber(),
+                        householdNo,
+                        status,
+                        dateRegistered
+                    });
+                }
             }
             
             updateRecordSummary();
@@ -3174,8 +3221,9 @@ public class BarangayResidentsSystem {
             int totalResidents = 0;
             int totalPopulation = 0;
             int seniors = 0;
-            int deceased = 0;
+            int archived = 0; // For archived count (deceased + transferred)
             
+            // Count active residents
             for (Resident r : panelResidents) {
                 if (r.getStatus() == Resident.ResidentStatus.ACTIVE) {
                     totalResidents++;
@@ -3185,15 +3233,16 @@ public class BarangayResidentsSystem {
                     for (HouseholdMember member : r.getHouseholdMembers()) {
                         if (member.getAge() >= 60) seniors++;
                     }
-                } else {
-                    deceased++;
                 }
             }
+            
+            // Count archived records
+            archived = panelArchive.size();
             
             summaryCardValues[0].setText(String.valueOf(totalResidents));
             summaryCardValues[1].setText(String.valueOf(totalPopulation));
             summaryCardValues[2].setText(String.valueOf(seniors));
-            summaryCardValues[3].setText(String.valueOf(deceased));
+            summaryCardValues[3].setText(String.valueOf(archived)); // Archived count only
         }
         
         // Method to apply filters
@@ -4439,7 +4488,7 @@ public class BarangayResidentsSystem {
             reportsGrid.setBorder(BorderFactory.createEmptyBorder(30, 20, 30, 20));
             
             reportsGrid.add(createReportCard("Demographic Summary", 
-                "Overview of barangay population statistics", new Color(76, 175, 80), 
+                "Overview of barangay population statistics including average age and sex percentages", new Color(76, 175, 80), 
                 e -> showDemographicSummary()));
             reportsGrid.add(createReportCard("Sex Distribution", 
                 "Breakdown by male and female (including all household members)", new Color(33, 150, 243),
@@ -4521,6 +4570,9 @@ public class BarangayResidentsSystem {
             int totalResidents = 0;
             int totalPopulation = 0;
             int households = 0;
+            int totalAgeSum = 0;
+            int maleCount = 0;
+            int femaleCount = 0;
             
             // Calculate from residents_secure.dat data
             for (Resident r : reportResidents) {
@@ -4528,8 +4580,30 @@ public class BarangayResidentsSystem {
                     totalResidents++;
                     totalPopulation += r.getTotalPopulation();
                     if (r.isHouseholdHead()) households++;
+                    
+                    // For average age calculation
+                    totalAgeSum += r.getAge();
+                    
+                    // For sex percentage
+                    if (r.getSex() != null) {
+                        if (r.getSex().equalsIgnoreCase("male")) maleCount++;
+                        else if (r.getSex().equalsIgnoreCase("female")) femaleCount++;
+                    }
+                    
+                    // Add household members to counts
+                    for (HouseholdMember member : r.getHouseholdMembers()) {
+                        totalAgeSum += member.getAge();
+                        if (member.getSex() != null) {
+                            if (member.getSex().equalsIgnoreCase("male")) maleCount++;
+                            else if (member.getSex().equalsIgnoreCase("female")) femaleCount++;
+                        }
+                    }
                 }
             }
+            
+            double avgAge = totalPopulation > 0 ? (double) totalAgeSum / totalPopulation : 0;
+            double malePct = totalPopulation > 0 ? (maleCount * 100.0 / totalPopulation) : 0;
+            double femalePct = totalPopulation > 0 ? (femaleCount * 100.0 / totalPopulation) : 0;
             
             String message = String.format(
                 "<html><div style='width: 450px;'>" +
@@ -4539,10 +4613,13 @@ public class BarangayResidentsSystem {
                 "<tr><td style='padding: 8px;'><b>Total Registered Residents (Heads):</b></td><td style='padding: 8px;'>%d</td></tr>" +
                 "<tr style='background-color: #f5f5f5;'><td style='padding: 8px;'><b>Total Population (including household members):</b></td><td style='padding: 8px;'>%d</td></tr>" +
                 "<tr><td style='padding: 8px;'><b>Total Households:</b></td><td style='padding: 8px;'>%d</td></tr>" +
-                "<tr style='background-color: #f5f5f5;'><td style='padding: 8px;'><b>Report Date:</b></td><td style='padding: 8px;'>%s</td></tr>" +
+                "<tr style='background-color: #f5f5f5;'><td style='padding: 8px;'><b>Average Age:</b></td><td style='padding: 8px;'>%.1f years</td></tr>" +
+                "<tr><td style='padding: 8px;'><b>Male Percentage:</b></td><td style='padding: 8px;'>%.1f%% (%d individuals)</td></tr>" +
+                "<tr style='background-color: #f5f5f5;'><td style='padding: 8px;'><b>Female Percentage:</b></td><td style='padding: 8px;'>%.1f%% (%d individuals)</td></tr>" +
+                "<tr><td style='padding: 8px;'><b>Report Date:</b></td><td style='padding: 8px;'>%s</td></tr>" +
                 "</table>" +
                 "</div></html>",
-                totalResidents, totalPopulation, households,
+                totalResidents, totalPopulation, households, avgAge, malePct, maleCount, femalePct, femaleCount,
                 LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
             );
             
@@ -4901,11 +4978,13 @@ public class BarangayResidentsSystem {
     class AccountSettingsPanel extends JPanel {
         private User settingsUser;                   // Current user
         private List<User> allUsers;                  // All users list (from master file)
+        private List<ArchiveRecord> allArchive;        // Archive list for reference
         
         // Constructor
-        public AccountSettingsPanel(User user, List<User> users) {
+        public AccountSettingsPanel(User user, List<User> users, List<ArchiveRecord> archive) {
             this.settingsUser = user;
             this.allUsers = users;
+            this.allArchive = archive;
             
             setLayout(new BorderLayout());
             setBackground(Color.WHITE);
@@ -5072,7 +5151,14 @@ public class BarangayResidentsSystem {
         
         // Method to view login history from system_logs.dat
         private void viewLoginHistory() {
-            List<String> logs = SecureFileHandler.getLoginHistory(settingsUser.getUsername());
+            List<String> logs;
+            
+            // Admin can view all logs, others only their own
+            if (settingsUser instanceof Admin) {
+                logs = SecureFileHandler.getAllLoginHistory();
+            } else {
+                logs = SecureFileHandler.getLoginHistory(settingsUser.getUsername());
+            }
             
             if (logs.isEmpty()) {
                 JOptionPane.showMessageDialog(this, 
@@ -5082,20 +5168,22 @@ public class BarangayResidentsSystem {
             }
             
             JDialog historyDialog = new JDialog((JFrame) SwingUtilities.getWindowAncestor(this), "Login History", true);
-            historyDialog.setSize(500, 350);
+            historyDialog.setSize(600, 400);
             historyDialog.setLocationRelativeTo(this);
             
             JPanel mainPanel = new JPanel(new BorderLayout());
             mainPanel.setBackground(Color.WHITE);
             mainPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
             
-            JLabel titleLabel = new JLabel("Login History for " + settingsUser.getUsername());
+            String title = settingsUser instanceof Admin ? 
+                "All Users Login History" : "Login History for " + settingsUser.getUsername();
+            JLabel titleLabel = new JLabel(title);
             titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 14));
             titleLabel.setForeground(BarangayColors.PRIMARY_BLUE);
             titleLabel.setBorder(BorderFactory.createEmptyBorder(0, 0, 10, 0));
             
             // Table for logs
-            String[] columns = {"Timestamp", "Action"};
+            String[] columns = {"Timestamp", "Username", "Action"};
             DefaultTableModel logModel = new DefaultTableModel(columns, 0) {
                 @Override
                 public boolean isCellEditable(int row, int column) {
@@ -5108,12 +5196,15 @@ public class BarangayResidentsSystem {
                 String log = logs.get(i);
                 String[] parts = log.split("\\|");
                 if (parts.length >= 3) {
-                    logModel.addRow(new Object[]{parts[0], parts[2]});
+                    logModel.addRow(new Object[]{parts[0], parts[1], parts[2]});
                 }
             }
             
             JTable logTable = new StyledTable(logModel);
             logTable.setRowHeight(25);
+            logTable.getColumnModel().getColumn(0).setPreferredWidth(150);
+            logTable.getColumnModel().getColumn(1).setPreferredWidth(100);
+            logTable.getColumnModel().getColumn(2).setPreferredWidth(300);
             JScrollPane scrollPane = new JScrollPane(logTable);
             scrollPane.setBorder(new LineBorder(BarangayColors.BORDER_COLOR, 1));
             
